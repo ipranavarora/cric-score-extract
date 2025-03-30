@@ -1,82 +1,12 @@
 import requests
 from bs4 import BeautifulSoup
-import re
-from flask import Flask, request, render_template_string
-
-app = Flask(__name__)
-
-# --- HTML Template ---
-# Using render_template_string for simplicity to keep it in one file.
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Cricbuzz Score Extractor</title>
-    <style>
-        body { font-family: sans-serif; line-height: 1.6; padding: 20px; }
-        label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input[type="text"] { width: 80%; max-width: 600px; padding: 8px; margin-bottom: 10px; }
-        button { padding: 10px 15px; cursor: pointer; }
-        .result { margin-top: 20px; padding: 15px; border: 1px solid #ccc; background-color: #f9f9f9; }
-        .error { color: red; font-weight: bold; }
-        .score-details { margin-top: 10px; }
-        .score-details p { margin: 5px 0; }
-    </style>
-</head>
-<body>
-    <h1>Cricbuzz Live Score Extractor (Specific Match URL)</h1>
-    <p>Enter the full URL of a live Cricbuzz match page (e.g., https://www.cricbuzz.com/live-cricket-scores/...)</p>
-
-    <form method="post">
-        <label for="url">Match URL:</label>
-        <input type="text" id="url" name="url" size="70" value="{{ request.form.url if request.form.url else '' }}" required>
-        <button type="submit">Get Score</button>
-    </form>
-
-    {% if error %}
-        <div class="result error">
-            Error: {{ error }}
-        </div>
-    {% endif %}
-
-    {% if score_data %}
-        <div class="result">
-            <h2>Match Details:</h2>
-            <p><strong>{{ score_data.title }}</strong></p>
-            <hr>
-            <div class="score-details">
-                <p><strong>Score 1:</strong> {{ score_data.score1 if score_data.score1 else 'N/A' }}</p>
-                <p><strong>Score 2:</strong> {{ score_data.score2 if score_data.score2 else 'N/A' }}</p>
-                <p><strong>Status:</strong> {{ score_data.status if score_data.status else 'N/A' }}</p>
-                <p><strong>Batsmen:</strong></p>
-                <ul>
-                    {% for batter in score_data.batsmen %}
-                        <li>{{ batter }}</li>
-                    {% else %}
-                        <li>N/A</li>
-                    {% endfor %}
-                </ul>
-                <p><strong>Bowlers:</strong></p>
-                 <ul>
-                    {% for bowler in score_data.bowlers %}
-                        <li>{{ bowler }}</li>
-                    {% else %}
-                        <li>N/A</li>
-                    {% endfor %}
-                </ul>
-                 <p><strong>Recent Overs:</strong> {{ score_data.recent_overs if score_data.recent_overs else 'N/A' }}</p>
-            </div>
-            <p><small><em>Note: Scraped data depends on Cricbuzz's current HTML structure and may break if they change it.</em></small></p>
-        </div>
-    {% endif %}
-
-</body>
-</html>
-"""
+import re  # Make sure re is imported
+import traceback
 
 def extract_score_from_url(url):
     """
     Fetches and extracts score details from a specific Cricbuzz match URL.
+    Uses Regex within the finished match container for more robust score finding.
 
     Args:
         url (str): The URL of the Cricbuzz match page.
@@ -86,7 +16,7 @@ def extract_score_from_url(url):
         str: An error message string if unsuccessful.
     """
     if not url or not url.startswith("http") or "cricbuzz.com/live-cricket-scores/" not in url:
-        return "Invalid Cricbuzz match URL provided."
+        return "Invalid Cricbuzz match URL provided. Needs to be like 'https://www.cricbuzz.com/live-cricket-scores/...'"
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -105,6 +35,13 @@ def extract_score_from_url(url):
         "recent_overs": "N/A"
     }
 
+    # Regex to find score patterns like "TEAM XXX/Y (ZZ.Z Ov)" or "TEAM XXX (ZZ Ov)"
+    # Allows for 2-4 uppercase letters for team, optional /wickets, optional (Overs)
+    score_pattern = re.compile(r"([A-Z]{2,4}\s+\d{1,3}(?:/\d{1,2})?(?:\s+\(\d{1,3}(?:\.\d)?\s*Ov\))?)")
+    # Simpler pattern if the above is too complex or fails (finds TEAM SCORE/Wkts):
+    # score_pattern_simple = re.compile(r"([A-Z]{2,4}\s+\d{1,3}(?:/\d{1,2})?)")
+
+
     try:
         print(f"Attempting to fetch: {url}")
         response = requests.get(url, headers=headers, timeout=20)
@@ -119,124 +56,137 @@ def extract_score_from_url(url):
         extracted_data['title'] = title_tag.text.strip() if title_tag else "Title Not Found"
         print(f"Found Title: {extracted_data['title']}")
 
-        # --- Locate the Miniscore Container (based on provided HTML structure) ---
-        # This div often contains the core score elements we need
-        miniscore_container = soup.find('div', class_='cb-col-100 cb-mini-col') # Trying a slightly broader class first
+        # --- Locate the Main Score/Status Area ---
+        live_container = soup.find('div', class_='cb-min-lv')
+        finished_container = soup.find('div', class_='cb-min-comp')
 
-        if not miniscore_container:
-             # Fallback using a different potential parent or structure if the first fails
-             miniscore_container = soup.find('div', ng_include="'miniscore'")
-             if miniscore_container:
-                 # If found via ng-include, re-parse its content if needed (though BS4 usually handles this)
-                 miniscore_container = BeautifulSoup(str(miniscore_container), 'html.parser') # Re-parse just this section maybe?
+        is_live = bool(live_container)
+        is_finished = bool(finished_container)
 
-        if not miniscore_container:
-             # Final attempt: Look for the score wrapper directly
-             miniscore_container = soup.find('div', class_='cb-col-scores') # Find the direct parent of scores
+        if is_finished:
+            print("Detected finished match structure.")
+            container_to_search = finished_container
+            # --- Finished Match Logic ---
+            status_tag = container_to_search.find('div', class_=re.compile(r'cb-text-(complete|result)'))
+            extracted_data['status'] = status_tag.text.strip() if status_tag else "Status Not Found in Finished Container"
 
-        if not miniscore_container:
-            print("Could not find the main miniscore container.")
-            # Try finding elements globally if container is missed (less reliable)
-            score1_tag = soup.find('h2', class_='cb-text-gray') # Often Innings 1 / opponent score
-            score2_tag = soup.find('h2', class_=lambda x: x and 'cb-font-20' in x.split()) # Often Innings 2 / current score
-            status_tag = soup.find('div', class_=re.compile(r'cb-text-(inprogress|live|complete|result|stumps|innings break)')) # Status line
-        else:
-            print("Found miniscore container (or alternative structure).")
-            # Find elements within the container
+            # --- Extract scores using REGEX within the finished container ---
+            container_text = container_to_search.get_text(separator=' ', strip=True)
+            print(f"Text in finished container: '{container_text[:500]}...'") # Print start of text for debug
+            score_matches = score_pattern.findall(container_text)
+
+            print(f"Regex score matches found: {score_matches}")
+
+            if len(score_matches) >= 1:
+                extracted_data['score1'] = score_matches[0].strip()
+                 # Try to remove the result text if it got included in the regex match accidentally
+                if extracted_data['status'] != "Status Not Found in Finished Container" and extracted_data['status'] in extracted_data['score1']:
+                     extracted_data['score1'] = extracted_data['score1'].replace(extracted_data['status'], '').strip()
+
+            if len(score_matches) >= 2:
+                extracted_data['score2'] = score_matches[1].strip()
+                if extracted_data['status'] != "Status Not Found in Finished Container" and extracted_data['status'] in extracted_data['score2']:
+                     extracted_data['score2'] = extracted_data['score2'].replace(extracted_data['status'], '').strip()
+
+            # If regex failed, maybe try finding the h2 tags again as a last resort?
+            if extracted_data['score1'] == 'N/A' or extracted_data['score2'] == 'N/A':
+                 print("Regex failed to find scores, trying h2.cb-min-tm fallback...")
+                 score_wrapper = container_to_search.find('div', class_='cb-scrs-wrp') or container_to_search
+                 score_tags_h2 = score_wrapper.find_all('h2', class_='cb-min-tm')
+                 if len(score_tags_h2) >= 1 and extracted_data['score1'] == 'N/A':
+                     extracted_data['score1'] = score_tags_h2[0].text.strip()
+                 if len(score_tags_h2) >= 2 and extracted_data['score2'] == 'N/A':
+                     extracted_data['score2'] = score_tags_h2[1].text.strip()
+
+
+            extracted_data['batsmen'] = ["N/A (Match Finished)"]
+            extracted_data['bowlers'] = ["N/A (Match Finished)"]
+            extracted_data['recent_overs'] = "N/A (Match Finished)"
+
+        elif is_live:
+            # Keep the existing live match logic (assuming it works reasonably well)
+            print("Detected live match structure. Using previous live logic.")
+            miniscore_container = live_container
+
+            status_tag = miniscore_container.find('div', class_=re.compile(r'cb-text-(inprogress|live|innings break|stumps)'))
+            extracted_data['status'] = status_tag.text.strip() if status_tag else "Status Not Found in Live Container"
+
             score1_tag = miniscore_container.find('h2', class_='cb-text-gray')
-            score2_tag = miniscore_container.find('h2', class_=lambda x: x and 'cb-font-20' in x.split()) # Use split for robustness
-            status_tag = miniscore_container.find('div', class_=re.compile(r'cb-text-(inprogress|live|complete|result|stumps|innings break)'))
+            score2_tag_container = miniscore_container.find('div', class_='cb-min-bat-rw')
+            score2_tag = score2_tag_container.find('h2', class_=lambda x: x and 'cb-font-20' in x.split()) if score2_tag_container else None
 
-        # Update the score container search
-        miniscore_container = soup.find('div', class_='cb-col-100 cb-min-stts') or \
-                            soup.find('div', class_='cb-col-100 cb-mini-col') or \
-                            soup.find('div', class_='cb-col-scores')
-
-        # First try to get match status to determine if match is finished
-        status_tag = soup.find('div', class_=re.compile(r'cb-text-(complete|result|stumps|innings break|live|inprogress)'))
-        extracted_data['status'] = status_tag.text.strip() if status_tag else "Status Not Found"
-        
-        # Try different score selectors based on match state
-        score_tags = soup.select('.cb-col-100.cb-col.cb-scrs-lst')
-        if score_tags:
-            # Match might be finished, try to get both innings scores
-            for i, score in enumerate(score_tags[:2], 1):
-                score_text = score.get_text(strip=True)
-                if i == 1:
-                    extracted_data['score1'] = score_text
-                else:
-                    extracted_data['score2'] = score_text
-        else:
-            # Try live match score format
-            score_parent = soup.find('div', class_='cb-min-bat-rw')
-            if score_parent:
-                current_score = score_parent.find('span', class_='cb-font-20')
-                if current_score:
-                    extracted_data['score1'] = current_score.text.strip()
-                
-                # Try to get previous innings score
-                prev_score = soup.find('span', class_='cb-text-gray')
-                if prev_score:
-                    extracted_data['score2'] = prev_score.text.strip()
-
-        # If still no scores found, try the original method
-        if extracted_data['score1'] == "N/A" and extracted_data['score2'] == "N/A":
-            score1_tag = soup.find('div', class_='cb-min-bat-rw')
-            score2_tag = soup.find('span', class_='cb-text-gray')
-            
             extracted_data['score1'] = score1_tag.text.strip() if score1_tag else "Score 1 Not Found"
             extracted_data['score2'] = score2_tag.text.strip() if score2_tag else "Score 2 Not Found"
 
-        # --- Extract Batsmen and Bowler Info ---
-        # Look for the tables within the container or globally if needed
-        info_tables_container = miniscore_container if miniscore_container else soup
+            batsman_section = miniscore_container.find('div', class_='cb-min-inf')
+            bowler_section = batsman_section.find_next_sibling('div', class_='cb-min-inf') if batsman_section else None
 
-        batsman_rows = info_tables_container.select('div.cb-min-inf div.cb-col-100.cb-min-itm-rw') # Should select both batsman rows
-        if len(batsman_rows) > 1: # Check if we have at least 2 rows likely belonging to batsmen table
-             # Assume first section is batsmen
-             for row in batsman_rows[:2]: # Take the first two relevant rows
-                name_tag = row.find('a', class_='cb-text-link')
-                runs_tag = row.find('div', class_='cb-col-10') # First cb-col-10 is Runs
-                balls_tag = row.find_all('div', class_='cb-col-10') # Second cb-col-10 is Balls
-                if name_tag and runs_tag and len(balls_tag) > 1:
-                     name = name_tag.text.strip()
-                     runs = runs_tag.text.strip()
-                     balls = balls_tag[1].text.strip() # Get the second one for balls
-                     extracted_data['batsmen'].append(f"{name}*: {runs} ({balls})") # Assuming first is striker
+            if batsman_section:
+                batsman_rows = batsman_section.select('.cb-col-100.cb-min-itm-rw')
+                for row in batsman_rows:
+                    name_tag = row.find('a', class_='cb-text-link')
+                    runs_tag = row.find('div', class_='cb-col-10')
+                    balls_tag_list = row.find_all('div', class_='cb-col-10')
+                    if name_tag and runs_tag and len(balls_tag_list) > 1:
+                         name = name_tag.text.strip()
+                         runs = runs_tag.text.strip()
+                         balls = balls_tag_list[1].text.strip()
+                         is_striker = '*' in row.find('div', class_='cb-col-50').text
+                         extracted_data['batsmen'].append(f"{name}{'*' if is_striker else ''}: {runs} ({balls})")
 
-        bowler_rows = info_tables_container.select('div.cb-min-inf ~ div.cb-min-inf div.cb-col-100.cb-min-itm-rw') # Select rows in the *second* cb-min-inf block
-        if not bowler_rows and len(batsman_rows) > 2: # If the specific selector failed, try using the remaining rows
-             bowler_rows = batsman_rows[2:] # Assume rows after batsmen are bowlers (less reliable)
+            if bowler_section:
+                 bowler_rows = bowler_section.select('.cb-col-100.cb-min-itm-rw')
+                 for row in bowler_rows:
+                     name_tag = row.find('a', class_='cb-text-link')
+                     overs_tag = row.find('div', class_='cb-col-10')
+                     runs_tag_list = row.find_all('div', class_='cb-col-10')
+                     wickets_tag_list = row.find_all('div', class_='cb-col-8')
+                     if name_tag and overs_tag and len(runs_tag_list) > 1 and len(wickets_tag_list) > 1:
+                         name = name_tag.text.strip()
+                         overs = overs_tag.text.strip()
+                         runs = runs_tag_list[1].text.strip()
+                         wickets = wickets_tag_list[1].text.strip()
+                         extracted_data['bowlers'].append(f"{name}: {overs}-{runs}-{wickets}")
 
-        for row in bowler_rows:
-             name_tag = row.find('a', class_='cb-text-link')
-             overs_tag = row.find('div', class_='cb-col-10') # First cb-col-10 is Overs
-             runs_tag = row.find_all('div', class_='cb-col-10') # Third cb-col-10 is Runs
-             wickets_tag = row.find_all('div', class_='cb-col-8') # Second cb-col-8 is Wickets
-             if name_tag and overs_tag and len(runs_tag) > 1 and len(wickets_tag) > 1:
-                 name = name_tag.text.strip()
-                 overs = overs_tag.text.strip()
-                 runs = runs_tag[1].text.strip() # Get the second cb-col-10 for runs
-                 wickets = wickets_tag[1].text.strip() # Get the second cb-col-8 for wickets
-                 extracted_data['bowlers'].append(f"{name}: {overs}-{runs}-{wickets}")
+            recent_overs_tag = miniscore_container.find('div', class_='cb-min-rcnt')
+            if recent_overs_tag:
+                recent_span = recent_overs_tag.find('span', string=re.compile(r'Recent:'))
+                if recent_span:
+                    recent_text = recent_span.next_sibling
+                    if recent_text and isinstance(recent_text, str):
+                        extracted_data['recent_overs'] = recent_text.strip()
+                    elif recent_span.find_next_sibling('span'):
+                         extracted_data['recent_overs'] = recent_span.find_next_sibling('span').text.strip()
+        else:
+            # --- Fallback if neither live nor finished structure detected clearly ---
+            print("Could not detect standard live/finished structure. Attempting general extraction.")
+            status_tag = soup.find('div', class_=re.compile(r'cb-text-(complete|result|stumps|innings break|live|inprogress)'))
+            extracted_data['status'] = status_tag.text.strip() if status_tag else "Status Not Found (Fallback)"
 
-        # --- Extract Recent Overs ---
-        recent_overs_tag = soup.find('div', class_='cb-min-rcnt')
-        if recent_overs_tag:
-            # Extract the text content directly after the 'Recent: ' span
-            recent_text_node = recent_overs_tag.find('span', class_='text-bold').next_sibling
-            if recent_text_node and isinstance(recent_text_node, str):
-                 extracted_data['recent_overs'] = recent_text_node.strip()
+            # Try regex on the whole body as a last resort? (Less reliable)
+            body_text = soup.body.get_text(separator=' ', strip=True) if soup.body else ""
+            score_matches = score_pattern.findall(body_text)
+            if len(score_matches) >= 1:
+                 extracted_data['score1'] = score_matches[0].strip()
+            if len(score_matches) >= 2:
+                 extracted_data['score2'] = score_matches[1].strip()
+                 # Try to remove status if found
+                 if extracted_data['status'] != "Status Not Found (Fallback)" and extracted_data['status'] in extracted_data['score2']:
+                      extracted_data['score2'] = extracted_data['score2'].replace(extracted_data['status'], '').strip()
 
+        print("-" * 20)
+        print(f"Score 1 Extracted: {extracted_data['score1']}")
+        print(f"Score 2 Extracted: {extracted_data['score2']}")
+        print(f"Status Extracted: {extracted_data['status']}")
+        print(f"Batsmen Extracted: {extracted_data['batsmen']}")
+        print(f"Bowlers Extracted: {extracted_data['bowlers']}")
+        print(f"Recent Overs Extracted: {extracted_data['recent_overs']}")
+        print("-" * 20)
 
-        print(f"Batsmen: {extracted_data['batsmen']}")
-        print(f"Bowlers: {extracted_data['bowlers']}")
-        print(f"Recent Overs: {extracted_data['recent_overs']}")
-
-
-        # Check if we actually got score data, not just "Not Found"
-        if extracted_data['score1'] == "Score 1 Not Found" and extracted_data['score2'] == "Score 2 Not Found":
-             return "Could not extract score information. Page structure might have changed or match is not live/valid."
+        # Final check if essential data is missing
+        if extracted_data['status'].startswith("Status Not Found") and \
+           (extracted_data['score1'] == 'N/A' or extracted_data['score1'].startswith("Score 1 Not Found")):
+             return "Could not extract essential score/status information. Page structure might have changed, match not started, or URL is invalid."
 
         return extracted_data
 
@@ -247,26 +197,57 @@ def extract_score_from_url(url):
         print(f"Error fetching URL: {e}")
         return f"Error fetching URL: {e}"
     except Exception as e:
-        print(f"An error occurred during parsing: {e}")
-        import traceback
+        print(f"An error occurred during parsing or processing: {e}")
         traceback.print_exc() # Print detailed traceback for debugging
         return f"An error occurred while parsing the page: {e}"
 
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    score_data = None
-    error = None
-    if request.method == 'POST':
-        url = request.form.get('url')
-        result = extract_score_from_url(url)
-        if isinstance(result, dict):
-            score_data = result
-        else:
-            error = result
-    return render_template_string(HTML_TEMPLATE, score_data=score_data, error=error, request=request)
-
+# --- Command-Line Interface Execution ---
 if __name__ == '__main__':
-    # Make it accessible on your local network (optional)
-    # app.run(debug=True, host='0.0.0.0')
-    app.run(debug=True) # Run only on localhost by default
+    try:
+        url_input = input("Enter Cricbuzz match URL: ")
+        score_result = extract_score_from_url(url_input)
+
+        print("\n" + "="*30)
+        if isinstance(score_result, dict):
+            print("      Match Score Details")
+            print("="*30)
+            print(f" Title:         {score_result.get('title', 'N/A')}")
+            print(f" Score 1:       {score_result.get('score1', 'N/A')}")
+            print(f" Score 2:       {score_result.get('score2', 'N/A')}")
+            print(f" Status:        {score_result.get('status', 'N/A')}")
+            print("-"*30)
+
+            batsmen = score_result.get('batsmen', [])
+            if batsmen and batsmen[0] != "N/A (Match Finished)":
+                print(" Batsmen:")
+                for batter in batsmen:
+                    print(f"   - {batter}")
+            else:
+                 print(" Batsmen:       N/A")
+
+            bowlers = score_result.get('bowlers', [])
+            if bowlers and bowlers[0] != "N/A (Match Finished)":
+                print("\n Bowlers:")
+                for bowler in bowlers:
+                    print(f"   - {bowler}")
+            else:
+                 print("\n Bowlers:       N/A")
+
+            recent = score_result.get('recent_overs', 'N/A')
+            if recent != "N/A (Match Finished)":
+                 print(f"\n Recent Overs:  {recent}")
+            else:
+                 print(f"\n Recent Overs:  N/A")
+
+            print("="*30)
+            print("\nNote: Accuracy depends on Cricbuzz's current HTML structure and score text format.")
+
+        else:
+            # It's an error message string
+            print(f" Error: {score_result}")
+            print("="*30)
+
+    except Exception as main_e:
+         print(f"\nAn unexpected error occurred in the main execution block: {main_e}")
+         traceback.print_exc()
